@@ -43,37 +43,76 @@ DIFFICULTIES = {
 
 
 class ScoreKeeper:
+    """Tracks both this session's numbers and permanent lifetime stats.
+
+    Lifetime stats (best_score, total_games, total_wins, total_losses,
+    best_streak) are written to scores.json after every single round, so
+    they survive closing the terminal, restarting the laptop, etc. They
+    only ever go up - closing/reopening never resets them.
+    """
+
     def __init__(self):
+        # Session-only (resets each time you run the script)
         self.session_score = 0
         self.wins = 0
         self.losses = 0
         self.streak = 0
-        self.best_score = self.load_best_score()
 
-    def load_best_score(self):
+        # Lifetime (persisted to disk, never resets on its own)
+        self.best_score = 0
+        self.total_games = 0
+        self.total_wins = 0
+        self.total_losses = 0
+        self.best_streak = 0
+
+        self.load_stats()
+
+    def load_stats(self):
         if not SCORE_FILE.exists():
-            return 0
+            return
         try:
             data = json.loads(SCORE_FILE.read_text(encoding="utf-8"))
-            return int(data.get("best_score", 0))
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return 0
+            return
 
-    def save_best_score(self):
-        data = {"best_score": self.best_score}
+        self.best_score = int(data.get("best_score", 0))
+        self.total_games = int(data.get("total_games", 0))
+        self.total_wins = int(data.get("total_wins", 0))
+        self.total_losses = int(data.get("total_losses", 0))
+        self.best_streak = int(data.get("best_streak", 0))
+
+    def save_stats(self):
+        data = {
+            "best_score": self.best_score,
+            "total_games": self.total_games,
+            "total_wins": self.total_wins,
+            "total_losses": self.total_losses,
+            "best_streak": self.best_streak,
+        }
         SCORE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def record_win(self, points):
         self.wins += 1
         self.streak += 1
         self.session_score += points
+
+        self.total_games += 1
+        self.total_wins += 1
         if self.session_score > self.best_score:
             self.best_score = self.session_score
-            self.save_best_score()
+        if self.streak > self.best_streak:
+            self.best_streak = self.streak
+
+        self.save_stats()
 
     def record_loss(self):
         self.losses += 1
         self.streak = 0
+
+        self.total_games += 1
+        self.total_losses += 1
+
+        self.save_stats()
 
 
 class NumberGuessingGame:
@@ -103,10 +142,11 @@ class NumberGuessingGame:
         subtitle.stylize("spring_green1")
 
         art = r"""
-        +----------------------------------------+
-        |          GUESS THE NUMBER             |
-        |      Read the hints. Beat the odds.   |
-        +----------------------------------------+
+ _   _                 _                  ____                       
+| \ | |_   _ _ __ ___ | |__   ___ _ __   / ___| _   _  ___  ___ ___  
+|  \| | | | | '_ ` _ \| '_ \ / _ \ '__| | |  _ | | | |/ _ \/ __/ __| 
+| |\  | |_| | | | | | | |_) |  __/ |    | |_| || |_| |  __/\__ \__ \ 
+|_| \_|\__,_|_| |_| |_|_.__/ \___|_|     \____| \__,_|\___||___/___/
         """
 
         panel = Panel(
@@ -120,6 +160,7 @@ class NumberGuessingGame:
             padding=(1, 2),
         )
         self.console.print(panel)
+        self.console.print(self.lifetime_stats_table())
 
         if not self.fast:
             self.type_line("Booting stable dashboard interface...", "bold cyan")
@@ -222,7 +263,6 @@ class NumberGuessingGame:
         result_screen = None
 
         layout = self.build_dashboard(
-            difficulty=difficulty,
             attempt=attempt,
             max_attempts=max_attempts,
             hint=hint,
@@ -241,7 +281,6 @@ class NumberGuessingGame:
             while attempt < max_attempts and result_screen is None:
                 live.update(
                     self.build_dashboard(
-                        difficulty=difficulty,
                         attempt=attempt,
                         max_attempts=max_attempts,
                         hint=hint,
@@ -251,7 +290,15 @@ class NumberGuessingGame:
                     refresh=True,
                 )
 
-                guess = self.ask_for_guess(difficulty, live)
+                # Pause the live renderer while we block on input.
+                # This is the fix for the terminal filling up with
+                # duplicate boxes: Live can't safely redraw in-place
+                # while console.input() is also writing to the screen,
+                # so we stop it first and restart it right after.
+                live.stop()
+                guess = self.ask_for_guess(difficulty, self.console)
+                live.start(refresh=False)
+
                 if guess is None:
                     hint = "Invalid coordinate. Enter a valid number in range."
                     tone = "red1"
@@ -267,7 +314,6 @@ class NumberGuessingGame:
                     tone = "spring_green1"
                     live.update(
                         self.build_dashboard(
-                            difficulty=difficulty,
                             attempt=attempt,
                             max_attempts=max_attempts,
                             hint=hint,
@@ -294,12 +340,12 @@ class NumberGuessingGame:
             live.update(result_screen, refresh=True)
             time.sleep(0.35 if not self.fast else 0.1)
 
-    def ask_for_guess(self, difficulty, live):
+    def ask_for_guess(self, difficulty, console):
         prompt = (
             f"[bold spring_green1]>[/bold spring_green1] Enter coordinates "
             f"[dim]({difficulty.low}-{difficulty.high})[/dim]: "
         )
-        answer = live.console.input(prompt).strip().lower()
+        answer = console.input(prompt).strip().lower()
         self.quit_if_requested(answer)
 
         try:
@@ -321,30 +367,39 @@ class NumberGuessingGame:
 
         return guess
 
+    def lifetime_stats_table(self):
+        table = Table(title="All-Time Record", border_style="magenta1")
+        table.add_column("Metric", style="bold white")
+        table.add_column("Value", justify="right", style="spring_green1")
+        table.add_row("Best Score", str(self.score.best_score))
+        table.add_row("Total Games", str(self.score.total_games))
+        table.add_row("Total Wins", str(self.score.total_wins))
+        table.add_row("Total Losses", str(self.score.total_losses))
+        table.add_row("Best Streak", str(self.score.best_streak))
+        return table
+
     def print_score_table(self):
-        score_table = Table(title="Current Score", border_style="cyan1")
+        score_table = Table(title="This Session", border_style="cyan1")
         score_table.add_column("Metric", style="bold white")
         score_table.add_column("Value", justify="right", style="spring_green1")
         score_table.add_row("Score", str(self.score.session_score))
-        score_table.add_row("Best Score", str(self.score.best_score))
         score_table.add_row("Wins", str(self.score.wins))
         score_table.add_row("Losses", str(self.score.losses))
         score_table.add_row("Streak", str(self.score.streak))
         self.console.print()
         self.console.print(score_table)
+        self.console.print(self.lifetime_stats_table())
 
-    def build_dashboard(self, difficulty, attempt, max_attempts, hint, tone, previous_guesses):
+    def build_dashboard(self, attempt, max_attempts, hint, tone, previous_guesses):
         attempts_left = max_attempts - attempt
         guess_list = ", ".join(str(guess) for guess in previous_guesses) or "None yet"
 
         layout = Layout(name="root")
         layout.split_column(
-            Layout(name="header", size=8),
             Layout(name="body", size=12),
             Layout(name="footer", size=4),
         )
 
-        layout["header"].update(self.header_panel(difficulty))
         layout["body"].update(
             self.body_panel(
                 attempts_left=attempts_left,
@@ -356,29 +411,6 @@ class NumberGuessingGame:
         )
         layout["footer"].update(self.footer_panel())
         return layout
-
-    def header_panel(self, difficulty):
-        stats = Table.grid(expand=True)
-        stats.add_column(justify="left", ratio=1)
-        stats.add_column(justify="right", ratio=1)
-        stats.add_row(
-            f"[bold {difficulty.color}]{difficulty.name}[/bold {difficulty.color}] "
-            f"[white]{difficulty.low}-{difficulty.high}[/white]",
-            f"[bold yellow]Score[/bold yellow] {self.score.session_score}  "
-            f"[bold spring_green1]Best[/bold spring_green1] {self.score.best_score}",
-        )
-        stats.add_row(
-            f"[bold magenta1]Wins[/bold magenta1] {self.score.wins}  "
-            f"[bold red1]Losses[/bold red1] {self.score.losses}",
-            f"[bold cyan1]Streak[/bold cyan1] {self.score.streak}",
-        )
-
-        return Panel(
-            stats,
-            title="[bold white]COMMAND DASHBOARD[/bold white]",
-            border_style="bright_blue",
-            padding=(1, 2),
-        )
 
     def body_panel(self, attempts_left, max_attempts, hint, tone, previous_guesses):
         ratio = attempts_left / max_attempts
@@ -479,11 +511,11 @@ class NumberGuessingGame:
         summary.add_column("Metric", style="bold white")
         summary.add_column("Value", justify="right", style="spring_green1")
         summary.add_row("Score", str(self.score.session_score))
-        summary.add_row("Best Score", str(self.score.best_score))
         summary.add_row("Wins", str(self.score.wins))
         summary.add_row("Losses", str(self.score.losses))
         summary.add_row("Final Streak", str(self.score.streak))
         self.console.print(summary)
+        self.console.print(self.lifetime_stats_table())
         self.console.print("[bold cyan1]Session closed. Best of luck![/bold cyan1]")
 
     def type_line(self, message, style):
