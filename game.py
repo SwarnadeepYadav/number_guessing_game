@@ -56,9 +56,9 @@ class ScoreKeeper:
         self.session_score = 0
         self.wins = 0
         self.losses = 0
-        self.streak = 0
 
         # Lifetime (persisted to disk, never resets on its own)
+        self.streak = 0
         self.best_score = 0
         self.total_games = 0
         self.total_wins = 0
@@ -80,6 +80,7 @@ class ScoreKeeper:
         self.total_wins = int(data.get("total_wins", 0))
         self.total_losses = int(data.get("total_losses", 0))
         self.best_streak = int(data.get("best_streak", 0))
+        self.streak = int(data.get("current_streak", 0))
 
     def save_stats(self):
         data = {
@@ -88,6 +89,7 @@ class ScoreKeeper:
             "total_wins": self.total_wins,
             "total_losses": self.total_losses,
             "best_streak": self.best_streak,
+            "current_streak": self.streak,
         }
         SCORE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
